@@ -1,17 +1,81 @@
+# Methanol Synthesis Reactor
+import numpy as np
+import matplotlib.pyplot as plt
+import cantera as ct
+import processes as process
+
+# Initial flow rates
+F_CH4 = 1  # mol/s
+F_CO2 = 0.3  # mol/s
+F_H2O = 2.5  # mol/s
+flow_rates = {'CH4': F_CH4, 'CO2': F_CO2, 'H2O': F_H2O}  # Stored in dict and modified during the process chain.
+
+# Define state values @state 1
+T1 = 300  # K
+p1 = 15 * 100000  # Pa
+
+# process 1-2, isobaric heating
+# @state 2
+T2 = 600  # K
+p2 = p1  # Pa
+# Calculate heat input per unit mole???
+# Water passes through Boiler, CH4 and CO2 passes through heater, Both streams get mixed after @state 2
+delta_h_water = process.delta_h_water(T1, p1, T2, p2)  # J/mol
+delta_h_CH4_CO2 = process.delta_h_solution(T1, p1, T2, p2, {'CH4': F_CH4, 'CO2': F_CO2})  # J/mol
+delta_h = (F_H2O * delta_h_water) + ((F_CH4 + F_CO2) * delta_h_CH4_CO2)  # J / s ?????????????
+heat_1to2 = delta_h  # J / mol*s
+
+# process 2-3, isobaric heating
+# @state 3
+X_CH4 = 0.97  # Conversion extent methane
+p3 = p2  # Pa
+T3 = process.methane_reforming_temperature(T2, p3, X_CH4, flow_rates)  # K
+# Calculate heat input per unit mole???
+delta_h = process.delta_h_solution(T2, p2, T3, p3, flow_rates)  # J/mol
+
+# process 3-4, isobaric isothermal catalytic methane reforming
+# @state 4
+T4 = T3
+p4 = p3
+# Calculate heat input per unit mole???
+delta_h = process.delta_h_mixture(T3, T4, flow_rates)
+
+# process 4-5, isobaric cooling
+p5 = p4
+T5 = process.idt.water_vapour_temperature(p4)
+delta_h = process.delta_h_solution(T4 ,p4 , T5, p5, ABCDEASD)
+
+# process 5-6, isobaric isothermal steam separation
+T6 = T5
+p6 = p5
+delta_h = ?
+
+# process 6-7, isobaric cooling
+p7 = p6
+T7 = 300
+delta_h
+
+# process 7-8, isentropic compression
+
+
+# process 8-9, isobaric change in heat
+
+
+# process 9-10, isobaric isothermal catalytic methanol synthesis
+
+
+
+
+
+
+
+
+
+
+
 # MethanolSynthesis from Methane, Water and CarbonDioxide
 # Yeah!
 
-import math
-import numpy as np
-import scipy as sc
-import matplotlib.pyplot as plt
-import cantera as ct
-
-T1 = 300  # K
-p1 = 15 * 100000  # Pa
-FCH4 = 1  # mol/s
-FCO2 = 0.3  # mol/s
-FH2O = 2.5  # mol/s
 
 # @1: Initiate Gas Solution Methane and CarbonDioxide
 # CO2_CH4 = ct.Solution('gri30.yaml')
@@ -34,9 +98,9 @@ p2 = p1
 
 # New mixture to get extensive properties
 temp = ct.Solution('gri30.yaml')
-temp.X = {'CH4': FCH4, 'CO2': FCO2, 'H2O': FH2O}  # Important to set before .TP, otherwise pressure will change!
+temp.X = {'CH4': F_CH4, 'CO2': F_CO2, 'H2O': F_H2O}  # Important to set before .TP, otherwise pressure will change!
 temp.TP = T2, p2
-CO2_CH4_H20 = ct.Mixture([(temp, (FCH4 + FCO2 + FH2O))])
+CO2_CH4_H20 = ct.Mixture([(temp, (F_CH4 + F_CO2 + F_H2O))])
 
 # @3: Thermodynamic state
 T_reform = 600  # K, initial guess
@@ -51,7 +115,7 @@ while i <= X_CH4:
     CO2_CH4_H20.T = T_reform
     CO2_CH4_H20.equilibrate('TP')
     T_reform = T_reform + 5
-    i = 1 - (CO2_CH4_H20.species_moles[13] / FCH4)  # handwavy assumed to take F instead of n
+    i = 1 - (CO2_CH4_H20.species_moles[13] / F_CH4)  # handwavy assumed to take F instead of n
     temperature_list.append(T_reform)
     conversionextent_list.append(i)
 
@@ -104,7 +168,8 @@ methanolreactorphase.X = {'H2': x_H2, 'CO': x_CO, 'CO2': x_CO2}
 methanolreactorphase.TP = T7, p7
 
 
-def adiabatic_compression(T0, p0, p1, gamma):  # ideal isentropic compression. When is adiabaitc = reversible ok. Isnt isentropic = isotherm and adiabatic????
+def adiabatic_compression(T0, p0, p1,
+                          gamma):  # ideal isentropic compression. When is adiabaitc = reversible ok. Isnt isentropic = isotherm and adiabatic????
     T1 = T0 * (p0 / p1) ** ((1 - gamma) / gamma)
     return T1
 
@@ -112,6 +177,7 @@ def adiabatic_compression(T0, p0, p1, gamma):  # ideal isentropic compression. W
 def adiabatic_compression_real(p1, s0):
     while methanolreactorphase.s <= s0:
         methanolreactorphase.TP = (methanolreactorphase.T + 1), p1
+
 
 T8 = adiabatic_compression(T7, p7, p8, methanolreactorphase.cp_mole / methanolreactorphase.cv_mole)
 
@@ -124,4 +190,5 @@ methanolreactorphase.TP = T9, p9
 methanolreactorphase.equilibrate('TP')
 a = 0
 
-X_CO2_CO = methanolreactorphase.X[19]/(methanolreactorphase.X[13] + methanolreactorphase.X[14]+methanolreactorphase.X[19])
+X_CO2_CO = methanolreactorphase.X[19] / (
+            methanolreactorphase.X[13] + methanolreactorphase.X[14] + methanolreactorphase.X[19])
