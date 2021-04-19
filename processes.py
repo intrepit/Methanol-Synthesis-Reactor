@@ -73,7 +73,7 @@ class Stream:
     def get_species_moles(self, species):
         return moles(self._mixture, species)
 
-    # Return species molefraction of calling species
+    # Return species mole fraction of calling species
     def get_species_mole_fraction(self, species):
         return moles(self._solution, species)
 
@@ -91,7 +91,6 @@ class Stream:
             self._mixture.P = pressure
             self.tracker(process_name)
 
-
     def isentropic_change_of_pressure(self, P1, process_name):
         for pressure in np.linspace(self._solution.P, P1, self.resolution):
             self._solution.SP = self._solution.s, pressure
@@ -101,7 +100,10 @@ class Stream:
     def isentropic_change_of_volume(self, compression_ratio, process_name):
         pass
 
-    def ignore_specie_except(self):
+    def ignore_species_except(self):
+        pass
+
+    def ignore_species(self):
         pass
 
     # Equilibrates solution and mixture to new state by minimizing deltaGibbs
