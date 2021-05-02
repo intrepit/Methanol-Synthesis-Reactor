@@ -2,317 +2,285 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import cantera as ct
-from processes import Stream
 import ideal_thermodynamics as idt
-# Initial flow rates for all streams
+from operator import add
+from Stream import Stream
+
+# Modeling description
+
+# Initial flow rates for the water and the gas stream
 F_CH4 = 1  # mol/s
 F_CO2 = 0.3  # mol/s
 F_H2O = 2.5  # mol/s
-
-gas_flow_rates = {'CH4': F_CH4, 'CO2': F_CO2}
-water_flow_rates = {'H2O': F_H2O}
-flow_rates = {'CH4': F_CH4, 'CO2': F_CO2, 'H2O': F_H2O}  # Stored in dict and modified during the process chain. #stream1,2,3 flowrates
+gas_flows_in = {'CH4': F_CH4, 'CO2': F_CO2}  # mol/s
+water_flows_in = {'H2O': F_H2O}  # mol/s
 
 # Define state values @state 1
 T1 = 300  # K
 p1 = 15 * 100000  # Pa
 
 # Initialize Cantera objects.
-# One stream of water, water_in and another stream of gases CO2 + CH4 as gases_in
-# Water
+# Water to be modeled as pure fluid with a water EOS.
 water_in = ct.Water()
 water_in.TP = T1, p1
-# Gases
-gases_in = ct.Solution('gri30.yaml')
-gases_in.TPX = T1, p1, gas_flow_rates
-# Track gases in a process stream with the Stream class
-reactor_stream = Stream(gases_in, gas_flow_rates)
-resolution = 20
-reactor_stream.resolution = resolution
 
+# Gases to be modeled as ideal gases with gri30
+gases_in = ct.Solution('gri30.yaml')
+gases_in.TPX = T1, p1, gas_flows_in
+
+# Track both streams as a stream object.
+water_in_stream = Stream(water_in, water_flows_in)
+gas_stream = Stream(gases_in, gas_flows_in)
 
 # process 1-2, isobaric heating
 # @state 2
 T2 = 600  # K
 p2 = p1  # Pa
 # Heat gas stream
-reactor_stream.isobaric_change_of_temperature(T2, '1-2')
-# Boil water stream. I didnt write a class for this, thus ugly code
-water_temperatures = {}
-water_pressures = {}
-water_entropies = {}
-water_enthalpies = {}
-
-for temperature in np.linspace(T1, T2, resolution):
-    water_in.TP = temperature, p2
-    water_enthalpies.setdefault('1-2', []).append(water_in.enthalpy_mole)
-    water_entropies.setdefault('1-2', []).append(water_in.entropy_mole)
-    water_temperatures.setdefault('1-2', []).append(water_in.T)
-    water_pressures.setdefault('1-2', []).append(water_in.P)
-
-print(water_temperatures)
-
-# Mix streams @ T,P conditions of existing stream @ point 2
-reactor_stream.add_ideal_gas(water_flow_rates)
+gas_stream.isobaric_change_of_temperature(T2, '1-2')
+# Boil water stream
+water_in_stream.isobaric_change_of_temperature(T2, '1-2')
+# Mix streams @ T,P conditions of existing ideal gas stream
+gas_stream.add_ideal_gas(water_flows_in)
 
 # process 2-3, isobaric heating
 # to specified conversion extent of methane
 # @state 3
 X_CH4 = 0.97  # Conversion extent methane
 p3 = p2  # Pa
-T3 = reactor_stream.temperature_of_conversion_coefficient({'CH4': X_CH4})  # K
-reactor_stream.isobaric_change_of_temperature(T3, '2-3')
+T3 = gas_stream.temperature_of_conversion_coefficient({'CH4': X_CH4})  # K
+gas_stream.isobaric_change_of_temperature(T3, '2-3')
 
 # process 3-4, isobaric isothermal catalytic methane reforming @equilibrium
 # @state 4
 T4 = T3
 p4 = p3
 # Uses the stream __init__(solution) mechanism as default, here 'gri30.yaml'
-reactor_stream.chemical_reaction('gri30.yaml', '3-4')
+gas_stream.chemical_reaction('3-4')
 
 # process 4-5, isobaric cooling
 # @state 5
 p5 = p4
-T5 = idt.water_vapour_temperature(p4)  # solution.T_sat throws error. argument is partial pressure of water. Is this correct????
-reactor_stream.isobaric_change_of_temperature(T5, '4-5')
+T5 = idt.water_vapour_temperature(p4)
+gas_stream.isobaric_change_of_temperature(T5, '4-5')
 
 # process 5-6, isobaric isothermal steam separation
 # @state 6
 T6 = T5
 p6 = p5
-# Remove H2O of stream instance, method returns solution object of separated stream, flowrate of separated stream
-separated_water, separated_water_flow = reactor_stream.separate_water('5-6')  # Why do we track water enthalpy?????
+# Remove H2O of stream instance, and track separated stream as a new Stream()
+water_separated_stream = gas_stream.separate_water('5-6')
 
 # process 6-7, isobaric cooling
 # @state 7
 p7 = p6
 T7 = 300  # K
-reactor_stream.isobaric_change_of_temperature(T7, '6-7')
+gas_stream.isobaric_change_of_temperature(T7, '6-7')
 
 # process 7-8, isentropic compression
 # @state 8
 p8 = 60 * 100000  # Pa
-reactor_stream.isentropic_change_of_pressure(p8, '7-8')
+gas_stream.isentropic_change_of_pressure(p8, '7-8')
 
 # process 8-9, isobaric change in heat
 # @state 9
 p9 = p8
 T9 = 503  # K
-reactor_stream.isobaric_change_of_temperature(T9, '8-9')
+gas_stream.isobaric_change_of_temperature(T9, '8-9')
 
 # process 9-10, isobaric isothermal catalytic methanol synthesis @equilibrium
 p10 = p9
 T10 = T9
 # Create the catalytic reactor bed with the reaction mechanism 'methanol-synthesis.cti
-# Ignore all species except H2, CO2, CO, thus setting new flow rates. This will cut on values like enthalpy etc (!)
-# This is a wack hack.
-# Better to define a custom .yaml, where species names match gri30.yaml but only catalytic reactions are allowed
-reactor_stream.set_reaction_mechanism('methanol-synthesis.cti',
-                                      {'H2': reactor_stream.get_species_moles('H2'),
-                                       'CO': reactor_stream.get_species_moles('CO'),
-                                       'CO2': reactor_stream.get_species_moles('CO2')})
-reactor_stream.chemical_reaction('methanol-synthesis.cti', '9-10')
+# Ignore all species except H2, CO2, CO, thus setting new flow rates.
+gas_stream.set_reaction_mechanism('methanol-synthesis.cti',
+                                  {'H2': gas_stream.get_species_moles('H2'),
+                                   'CO': gas_stream.get_species_moles('CO'),
+                                   'CO2': gas_stream.get_species_moles('CO2')})
+gas_stream.chemical_reaction('9-10')
 
 
 # Data Analysis
-# Create numpy arrays for plotting
-temperature_list = []
-for key in reactor_stream.temperatures:
-    temperature_list.extend(reactor_stream.temperatures[key])
-temperatures = np.array(temperature_list)
+def graphing():
+    temperature_list = []
+    for key in gas_stream.temperatures:
+        temperature_list.extend(gas_stream.temperatures[key])
 
-pressure_list = []
-for key in reactor_stream.pressures:
-    pressure_list.extend(reactor_stream.pressures[key])
-pressures = np.array(pressure_list)
+    pressure_list = []
+    for key in gas_stream.pressures:
+        pressure_list.extend(gas_stream.pressures[key])
 
-entropy_list = []
-add_water_entropy = False
+    entropy_list = []
+    for key in gas_stream.entropies:
+        if key == '1-2':
+            entropy_list.extend(map(add, gas_stream.entropies[key], water_in_stream.entropies[key]))
+        elif key == '5-6':
+            entropy_list.extend(map(add, gas_stream.entropies[key], water_separated_stream.entropies[key]))
+        elif key in {'6-7', '7-8', '8-9', '9-10'}:
+            # separated water isn't processed anymore, thus its current entropy is taken instead
+            entropy_list.extend(map(lambda x: x + water_separated_stream.get_entropy(), gas_stream.entropies[key]))
+        else:
+            entropy_list.extend(gas_stream.entropies[key])
 
-for key in reactor_stream.entropies:  # Add water stream entropies starting from process 5-6 to the list
-    if key == '5-6':
-        add_water_entropy = True
-    if not add_water_entropy:
-        entropy_list.extend(reactor_stream.entropies[key])
+    debug_enthalpies = []
+    debug_temps = []
+    debug_key = '7-8'
+
+    if debug_key == '1-2':
+        debug_enthalpies.extend(map(add, gas_stream.enthalpies[debug_key], water_in_stream.enthalpies[debug_key]))
+        debug_temps.extend(gas_stream.temperatures[debug_key])
+    elif debug_key == '5-6':
+        debug_enthalpies.extend(
+            map(add, gas_stream.enthalpies[debug_key], water_separated_stream.enthalpies[debug_key]))
+        debug_temps.extend(gas_stream.temperatures[debug_key])
+    elif debug_key in {'6-7', '7-8', '8-9', '9-10'}:
+        debug_enthalpies.extend(
+            (map(lambda x: x + water_separated_stream.get_enthalpy(), gas_stream.enthalpies[debug_key])))
+        debug_temps.extend(gas_stream.temperatures[debug_key])
     else:
-        for entropies in reactor_stream.entropies[key]:
-            entropy_list.append(entropies + (separated_water.entropy_mole * separated_water_flow / 1000))
+        debug_enthalpies.extend(gas_stream.enthalpies[debug_key])
+        debug_temps.extend(gas_stream.temperatures[debug_key])
 
-entropies = np.array(entropy_list)
+    enthalpy_list = []
+    for key in gas_stream.enthalpies:
+        if key == '1-2':
+            enthalpy_list.extend(map(add, gas_stream.enthalpies[key], water_in_stream.enthalpies[key]))
+        elif key == '5-6':
+            enthalpy_list.extend(map(add, gas_stream.enthalpies[key], water_separated_stream.enthalpies[key]))
+        elif key in {'6-7', '7-8', '8-9', '9-10'}:
+            # separated water isn't processed anymore, thus its current enthalpy is taken instead
+            enthalpy_list.extend((map(lambda x: x + water_separated_stream.get_enthalpy(), gas_stream.enthalpies[key])))
+        else:
+            enthalpy_list.extend(gas_stream.enthalpies[key])
 
-enthalpy_list = []
-add_water_enthalpies = False
+    # Plotting
+    fig, ax = plt.subplots()
+    ax.plot(np.array(enthalpy_list), np.array(temperature_list), color='#43a047')
+    ax.plot(np.array(debug_enthalpies), np.array(debug_temps), color='#ff1744')
+    ax.set_facecolor('#f5f5f5')
+    ax.set_ylabel('Temperature [$K$]')
+    ax.set_xlabel(f'Enthalpy [J]')
+    ax.set_title('T-H diagram of  methanol synthesis')
+    plt.text(-920000, 300, '1')
+    plt.text(-770000, 600, '2')
+    plt.text(-658000, 1200, '3')
+    plt.text(-415000, 1200, '4')
+    plt.text(-560000, 465, '5')
+    plt.text(-618000, 434, '6')
+    plt.text(-655000, 300, '7')
+    plt.text(-640000, 436, '8')
+    plt.text(-627000, 516, '9')
+    plt.text(-693000, 516, '10')
+    ax.legend(['$F_{CH_4} = 1$    $mol$'  '\n' + '$F_{CO_2} = 0.3$ $mol$' + '\n' + '$F_{H_{2}O} $  $= 2.5$ $mol$'])
+    plt.savefig("T_H_diagram.png", dpi=1200)
+    plt.show()
 
-debug = []
-debug_temperatures = []
-
-for key in reactor_stream.enthalpies:
-    if key == '5-6':
-        add_water_enthalpies = True
-    if not add_water_enthalpies:
-        enthalpy_list.extend(reactor_stream.enthalpies[key])
-    else:
-        for enthalpies in reactor_stream.enthalpies[key]:
-            enthalpy_list.append(enthalpies + (separated_water.enthalpy_mole * separated_water_flow / 1000))
-            if key == '7-8':
-                debug.append(enthalpies + (separated_water.enthalpy_mole * separated_water_flow / 1000))
-                debug_temperatures = reactor_stream.temperatures['7-8']
-
-enthalpies = np.array(enthalpy_list)
-
-fig, ax = plt.subplots()
-ax.plot(enthalpies, temperatures)
-ax.plot(debug, debug_temperatures)
-ax.set_ylabel('Temperature [$K$]')
-ax.set_xlabel('Enthalpy [$J/(K)$]')
-ax.set_title('T-H diagram')
-plt.show()
-
-fig, ax = plt.subplots()
-ax.plot(entropies, temperatures)
-ax.set_ylabel('Temperature [$K$]')
-ax.set_xlabel('Entropy [$J/(K)$]')
-ax.set_title('T-S diagram')
-plt.show()
-
-
-
-"""
-# Calculate heat input per unit mole???
-# Water passes through Boiler, CH4 and CO2 passes through heater, Both streams get mixed after @state 2
-delta_h_water = process.delta_h_water(T1, p1, T2, p2)  # J/mol
-delta_h_CH4_CO2 = process.delta_h_solution(T1, p1, T2, p2, {'CH4': F_CH4, 'CO2': F_CO2})  # J/mol
-delta_h = (F_H2O * delta_h_water) + ((F_CH4 + F_CO2) * delta_h_CH4_CO2)  # J / s ?????????????
-heat_1to2 = delta_h  # J / mol*s
-"""
-
-
-""""
-
-
-
-# MethanolSynthesis from Methane, Water and CarbonDioxide
-# Yeah!
-
-
-# @1: Initiate Gas Solution Methane and CarbonDioxide
-# CO2_CH4 = ct.Solution('gri30.yaml')
-# CO2_CH4.X = {'CH4': FCH4, 'CO2': FCO2} #Important to set before .TP, otherwise pressure will change!
-# CO2_CH4.TP = T1, p1
-
-# Initiate Water as a Water Object
-# water = ct.Water()
-# water.TP = T1, p1
-
-# create Values to keep track off
+    fig, ax = plt.subplots()
+    ax.plot(np.array(entropy_list), np.array(temperature_list), color='#e57373')
+    ax.set_facecolor('#f5f5f5')
+    ax.set_ylabel('Temperature [$K$]')
+    ax.set_xlabel('Entropy [$J / K$]')
+    ax.set_title('T-S diagram of  methanol synthesis')
+    plt.text(383, 300, '1')
+    plt.text(720, 600, '2')
+    plt.text(868, 1200, '3')
+    plt.text(1130, 1200, '4')
+    plt.text(950, 465, '5')
+    plt.text(797, 434, '6')
+    plt.text(755, 300, '7')
+    plt.text(720, 436, '8')
+    plt.text(750, 516, '9')
+    plt.text(610, 516, '10')
+    ax.legend(['$F_{CH_4} = 1$    $mol$'  '\n' + '$F_{CO_2} = 0.3$ $mol$' + '\n' + '$F_{H_{2}O} $  $= 2.5$ $mol$'])
+    plt.savefig("T_S_diagram.png", dpi=1200)
+    plt.show()
+    return
 
 
-# @2: Thermodynamic state
-T2 = 600  # K
-p2 = p1
+def thermal_efficiency():
+    higher_heating_value_CH3OH = 0 - 726100  # J/mol
 
-# CO2_CH4.TP = T2, p2 #1.1-2.1 Heat Gas Solution isobaric to 600K
-# water.TP = T2, p2 #1.2-2.2 Heat Water isobaric to 600K
-
-# New mixture to get extensive properties
-temp = ct.Solution('gri30.yaml')
-temp.X = {'CH4': F_CH4, 'CO2': F_CO2, 'H2O': F_H2O}  # Important to set before .TP, otherwise pressure will change!
-temp.TP = T2, p2
-CO2_CH4_H20 = ct.Mixture([(temp, (F_CH4 + F_CO2 + F_H2O))])
-
-# @3: Thermodynamic state
-T_reform = 600  # K, initial guess
-p3 = p2
-X_CH4 = 0.97  # =1 -(F_CH4@3/F_CH4@2) = 1-(n_CH4@3/n_CH4@2)
-
-temperature_list = [T_reform]
-conversionextent_list = [0]
-
-i = 0  # start with 0 conversion of methane
-while i <= X_CH4:
-    CO2_CH4_H20.T = T_reform
-    CO2_CH4_H20.equilibrate('TP')
-    T_reform = T_reform + 5
-    i = 1 - (CO2_CH4_H20.species_moles[13] / F_CH4)  # handwavy assumed to take F instead of n
-    temperature_list.append(T_reform)
-    conversionextent_list.append(i)
-
-npx = np.array(temperature_list)
-npy = np.array(conversionextent_list)
-
-fig, ax = plt.subplots()
-ax.plot(npx, npy)
-ax.set_ylabel('Conversion Extent, CH4')
-ax.set_xlabel('Process Temperature [$T$]')
-ax.set_title(f"Methane Reforming at {p3 / 100000} $Bar$, steady state")
-plt.show()
-
-syngas_moles = CO2_CH4_H20.species_moles[0] + CO2_CH4_H20.species_moles[14] + CO2_CH4_H20.species_moles[
-    15]  # Moles of H2, CO, CO2 at 4
-x_H2 = CO2_CH4_H20.species_moles[0] / syngas_moles  # Molefraction H2 at 4
-x_CO = CO2_CH4_H20.species_moles[14] / syngas_moles  # Molefraction CO at 4
-x_CO2 = CO2_CH4_H20.species_moles[15] / syngas_moles  # Molefraction CO2 at 4
+    efficiency = (gas_stream.get_species_moles('CH3OH') * higher_heating_value_CH3OH) / \
+             ((gas_stream.enthalpies['1-2'][0] + water_in_stream.enthalpies['1-2'][0]) -
+              (sum(filter(lambda x: x > 0, heats.values())) + sum(works.values())))
+    return efficiency
 
 
-# @5 isobaric cooling to T = water gets liquid.
+def thermal_efficiency_limit():
+    higher_heating_value_CH3OH = 0 - 726100  # J/mol
 
-def clausius_clapeyron(p2):
-    L = 40800  # J/mol
-    R = 8.314462  # J/mol K
-    T1 = 273.15 + 100  # K
-    p1 = 101325  # Pa
+    def maximum_heat_exchange():
+        if sum(heats.values()) - heats['3-4'] >= 0:
+            return sum(heats.values())
+        else:
+            print(f'Anergy detected = {sum(heats.values()) - heats["3-4"]} J/s. Time to heat some buildings.')
+            return heats['3-4']
 
-    T2 = 1 / ((0 - np.log(p2 / p1) * (R / L)) + (1 / T1))
-    return (T2)
-
-
-T_H20 = clausius_clapeyron(p3)  # Water Vapor Temperature at p3
-CO2_CH4_H20.T = T_H20
-
-syngas_moles = CO2_CH4_H20.species_moles[0] + CO2_CH4_H20.species_moles[14] + CO2_CH4_H20.species_moles[
-    15]  # Moles of H2, CO, CO2 at 4
-print(syngas_moles)
-x_H2 = CO2_CH4_H20.species_moles[0] / syngas_moles  # Molefraction H2 at 4
-x_CO = CO2_CH4_H20.species_moles[14] / syngas_moles  # Molefraction CO at 4
-x_CO2 = CO2_CH4_H20.species_moles[15] / syngas_moles  # Molefraction CO2 at 4
-print(x_H2, x_CO, x_CO2)
-S_module = (x_H2 - x_CO2) / (x_CO2 + x_CO)
-
-T7 = 300  # K
-p7 = 15 * 100000  # Pa
-p8 = 60 * 100000  # Pa
-methanolreactorphase = ct.Solution('methanol-synthesis.cti')
-methanolreactorphase.X = {'H2': x_H2, 'CO': x_CO, 'CO2': x_CO2}
-methanolreactorphase.TP = T7, p7
+    efficiency_recuperation = (gas_stream.get_species_moles('CH3OH') * higher_heating_value_CH3OH) / \
+             ((gas_stream.enthalpies['1-2'][0] + water_in_stream.enthalpies['1-2'][0]) -
+              (maximum_heat_exchange() + sum(works.values())))
+    # print(gas_stream.get_species_moles('CH3OH') * higher_heating_value_CH3OH)
+    # print((gas_stream.enthalpies['1-2'][0] + water_in_stream.enthalpies['1-2'][0]), (sum(heats.values()) - heats['3-4'] + sum(works.values())))
+    return efficiency_recuperation
 
 
-def adiabatic_compression(T0, p0, p1,
-                          gamma):  # ideal isentropic compression. When is adiabaitc = reversible ok. Isnt isentropic = isotherm and adiabatic????
-    T1 = T0 * (p0 / p1) ** ((1 - gamma) / gamma)
-    return T1
+# Im a wrapper
+def delta_enthalpy(stream, process_name):
+    return stream.enthalpies[process_name][-1] - stream.enthalpies[process_name][0]
 
 
-def adiabatic_compression_real(p1, s0):
-    while methanolreactorphase.s <= s0:
-        methanolreactorphase.TP = (methanolreactorphase.T + 1), p1
+# Heat and Work calculation
+heats = {'1-2': delta_enthalpy(gas_stream, '1-2') + delta_enthalpy(water_in_stream, '1-2'),
+         # Add enthalpy change of both input streams
+         '2-3': delta_enthalpy(gas_stream, '2-3'),
+         '3-4': delta_enthalpy(gas_stream, '3-4'),
+         '4-5': delta_enthalpy(gas_stream, '4-5'),
+         '5-6': delta_enthalpy(gas_stream, '5-6') + (water_separated_stream.get_enthalpy() - 0),
+         # Add enthalpies of separated water stream and gas stream
+         '6-7': delta_enthalpy(gas_stream, '6-7'),
+         '8-9': delta_enthalpy(gas_stream, '8-9'),
+         '9-10': delta_enthalpy(gas_stream, '9-10')
+         }
+works = {'7-8': delta_enthalpy(gas_stream, '7-8')}
 
 
-T8 = adiabatic_compression(T7, p7, p8, methanolreactorphase.cp_mole / methanolreactorphase.cv_mole)
+# Print results
+print('Methane reforming temperature = ', T3, '\n')
 
-T8 = adiabatic_compression_real(p8, methanolreactorphase.s)
-methanolreactorphase.TP = T8, p8
+# Ignore all species except syngas
+x_CO = gas_stream.species_moles['5-6'][-1]['CO'] / sum(
+    [gas_stream.species_moles['5-6'][-1]['CO'], gas_stream.species_moles['5-6'][-1]['CO2'], gas_stream.species_moles['5-6'][-1]['H2']])
 
-T9 = 503  # K
-p9 = p8  # Pa
-methanolreactorphase.TP = T9, p9
-methanolreactorphase.equilibrate('TP')
-a = 0
+x_CO2 = gas_stream.species_moles['5-6'][-1]['CO2'] / sum(
+    [gas_stream.species_moles['5-6'][-1]['CO'], gas_stream.species_moles['5-6'][-1]['CO2'], gas_stream.species_moles['5-6'][-1]['H2']])
 
-X_CO2_CO = methanolreactorphase.X[19] / (
-            methanolreactorphase.X[13] + methanolreactorphase.X[14] + methanolreactorphase.X[19])
+x_H2 = gas_stream.species_moles['5-6'][-1]['H2'] / sum(
+    [gas_stream.species_moles['5-6'][-1]['CO'], gas_stream.species_moles['5-6'][-1]['CO2'], gas_stream.species_moles['5-6'][-1]['H2']])
 
+S_module = (x_H2 - x_CO2) / (x_CO + x_CO2)
+print(f"x_CO = {x_CO}, x_CO2 = {x_CO2}, x_H2 = {x_H2}", "\n"
+      f'S_module ={S_module}\n')
 
-"""
+print('@9 moles CO', gas_stream.species_moles['9-10'][0]['CO'], '\n'
+      '@9 moles CO2', gas_stream.species_moles['9-10'][0]['CO2'], '\n'
+      '@10 moles CO', gas_stream.species_moles['9-10'][-1]['CO'], '\n'
+      '@10 moles CO2', gas_stream.species_moles['9-10'][-1]['CO2'], '\n'
+      'X_CO+XO2 = ', 1 - ((gas_stream.species_moles['9-10'][-1]['CO'] + gas_stream.species_moles['9-10'][-1]['CO2']) / (gas_stream.species_moles['9-10'][0]['CO'] + gas_stream.species_moles['9-10'][0]['CO2'])), '\n')
 
+print('heats = ', heats, '\nworks', works, '\n')
 
+print(f'thermal efficiency limit = {thermal_efficiency_limit()}\n'
+      f'thermal efficiency = {thermal_efficiency()}\n'
+      f'methanol fraction of feed = {gas_stream.get_species_moles("CH3OH") / (F_CO2 + F_H2O + F_CH4)}', '\n'
+      )
 
+print(f"CO2   mfrac = {gas_stream.get_species_mole_fraction('CO2')}\n"
+      f"CO    mfrac = {gas_stream.get_species_mole_fraction('CO')}\n"
+      f"H2    mfrac = {gas_stream.get_species_mole_fraction('H2')}\n"
+      f"CH3OH mfrac = {gas_stream.get_species_mole_fraction('CH3OH')}\n"
+      )
+
+cup_o_coffe_enthalpy = 4181 * 80 * 0.4  # Energy needed to produce one coffee
+print(cup_o_coffe_enthalpy / -(sum(heats.values()) - heats["3-4"]))
+
+graphing()
